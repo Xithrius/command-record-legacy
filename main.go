@@ -1,75 +1,146 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"log"
 	"os"
+	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/spinner"
+	"os/exec"
+
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-type errMsg error
+const listHeight = 14
 
-type model struct {
-	spinner  spinner.Model
-	quitting bool
-	err      error
-}
-
-var quitKeys = key.NewBinding(
-	key.WithKeys("q", "esc", "ctrl+c"),
-	key.WithHelp("", "press q to quit"),
+var (
+	titleStyle        = lipgloss.NewStyle().MarginLeft(2)
+	itemStyle         = lipgloss.NewStyle().PaddingLeft(4)
+	selectedItemStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("170"))
+	paginationStyle   = list.DefaultStyles().PaginationStyle.PaddingLeft(4)
+	helpStyle         = list.DefaultStyles().HelpStyle.PaddingLeft(4).PaddingBottom(1)
+	quitTextStyle     = lipgloss.NewStyle().Margin(1, 0, 2, 4)
 )
 
-func initialModel() model {
-	s := spinner.New()
-	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
-	return model{spinner: s}
+type item string
+
+func (i item) FilterValue() string { return "" }
+
+type itemDelegate struct{}
+
+func (d itemDelegate) Height() int                             { return 1 }
+func (d itemDelegate) Spacing() int                            { return 0 }
+func (d itemDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
+	i, ok := listItem.(item)
+	if !ok {
+		return
+	}
+
+	str := fmt.Sprintf("%d. %s", index+1, i)
+
+	fn := itemStyle.Render
+	if index == m.Index() {
+		fn = func(s ...string) string {
+			return selectedItemStyle.Render("> " + strings.Join(s, " "))
+		}
+	}
+
+	fmt.Fprint(w, fn(str))
+}
+
+type model struct {
+	list     list.Model
+	choice   string
+	quitting bool
 }
 
 func (m model) Init() tea.Cmd {
-	return m.spinner.Tick
+	return nil
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.list.SetWidth(msg.Width)
+		return m, nil
 
 	case tea.KeyMsg:
-		if key.Matches(msg, quitKeys) {
+		switch keypress := msg.String(); keypress {
+		case "ctrl+c":
 			m.quitting = true
 			return m, tea.Quit
 
+		case "enter":
+			i, ok := m.list.SelectedItem().(item)
+			if ok {
+				m.choice = string(i)
+			}
+			return m, tea.Quit
 		}
-		return m, nil
-	case errMsg:
-		m.err = msg
-		return m, nil
-
-	default:
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
 	}
+
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
 }
 
 func (m model) View() string {
-	if m.err != nil {
-		return m.err.Error()
+	if m.choice != "" {
+		return quitTextStyle.Render(fmt.Sprintf("%s? Sounds good to me.", m.choice))
 	}
-	str := fmt.Sprintf("\n\n   %s Loading forever... %s\n\n", m.spinner.View(), quitKeys.Help().Desc)
 	if m.quitting {
-		return str + "\n"
+		return quitTextStyle.Render("Not hungry? That's cool.")
 	}
-	return str
+	return "\n" + m.list.View()
+}
+
+func get_history() []list.Item {
+	shell := os.Getenv("SHELL")
+	cmd := exec.Command(shell, "-c", "history")
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		log.Fatalf("Error executing command: %v\n%s", err, stderr.String())
+		os.Exit(1)
+	}
+
+	items := strings.Split(stdout.String(), "\n")
+
+	list_items := []list.Item{}
+
+	for i := range items {
+		list_items = append(list_items, item(items[i]))
+	}
+
+	return list_items
 }
 
 func main() {
-	p := tea.NewProgram(initialModel())
-	if _, err := p.Run(); err != nil {
-		fmt.Println(err)
+	items := get_history()
+
+	const defaultWidth = 20
+
+	l := list.New(items, itemDelegate{}, defaultWidth, listHeight)
+	l.Title = "What do you want for dinner?"
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(false)
+	l.Styles.Title = titleStyle
+	l.Styles.PaginationStyle = paginationStyle
+	l.Styles.HelpStyle = helpStyle
+
+	m := model{list: l}
+
+	if _, err := tea.NewProgram(m).Run(); err != nil {
+		fmt.Println("Error running program:", err)
 		os.Exit(1)
 	}
 }
